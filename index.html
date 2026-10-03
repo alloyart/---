@@ -522,17 +522,66 @@ canvas.addEventListener('wheel',e=>{
 
 // ---------- Search ----------
 const search=document.getElementById('search'),results=document.getElementById('results');
-function searchPeople(q){
-  q=q.trim();
-  if(!q)return[];
-  let qq=q;
-  const special=q==='李懿';
-  return DATA.filter(d=>{
-    if(special && d.id===me?.id)return true;
-    const hay=[d.name,d.zi,d.hao,d.father,d.mother,d.desc].filter(Boolean).join(' ');
-    return hay.includes(qq);
-  }).slice(0,40);
+function normalizeSearch(value){
+  return String(value||'').normalize('NFKC').toLowerCase().replace(/[\s·・•，,。:：()（）「」“”]/g,'');
 }
+function personQuery(value){
+  const q=normalizeSearch(value);
+  return q.replace(/^李氏/,'').replace(/^李(?=.)/,'');
+}
+function fuzzyScore(value,q){
+  const v=normalizeSearch(value);
+  if(!v || !q)return 0;
+  if(v===q)return 100;
+  if(v.startsWith(q))return 85;
+  if(v.includes(q))return 75;
+  // Ordered partial characters, e.g. 广龙 -> 广帅龙.
+  if(q.length>=2){
+    let i=0;for(const c of v)if(c===q[i])i++;
+    if(i===q.length)return 55;
+  }
+  // One mistyped, omitted or extra character; require two shared characters.
+  if(q.length>=3 && v.length>=3 && Math.abs(v.length-q.length)<=1){
+    let row=Array.from({length:q.length+1},(_,i)=>i);
+    for(let i=1;i<=v.length;i++){
+      const next=[i];
+      for(let j=1;j<=q.length;j++)next[j]=Math.min(next[j-1]+1,row[j]+1,row[j-1]+(v[i-1]===q[j-1]?0:1));
+      row=next;
+    }
+    if(row[q.length]<=1)return 40;
+  }
+  return 0;
+}
+function searchPeople(q){
+  const raw=normalizeSearch(q),key=personQuery(q);
+  if(!raw)return[];
+  return DATA.map((d,index)=>{
+    const aliases=[d.name,d.zi,d.hao,...(d.id===me?.id?['懿','李懿']:[])].filter(Boolean);
+    let score=0;
+    for(const alias of aliases){
+      for(const candidate of [alias,'李'+alias,'李氏'+alias]){
+        const v=normalizeSearch(candidate);
+        if(v===raw)score=Math.max(score,100);
+        else if(v.startsWith(raw))score=Math.max(score,85);
+        else if(v.includes(raw))score=Math.max(score,75);
+      }
+      if(key)score=Math.max(score,fuzzyScore(alias,key));
+    }
+    // Family-related matches follow matches to the person's own name.
+    for(const value of [d.father,d.mother]){
+      if(normalizeSearch(value).includes(raw) || (key && normalizeSearch(value).includes(key)))score=Math.max(score,25);
+    }
+    if(normalizeSearch(d.desc).includes(raw))score=Math.max(score,20);
+    return {d,score,index};
+  }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score||a.index-b.index).slice(0,40).map(x=>x.d);
+}
+function searchResultTitle(d,q){
+  if(d.id===me?.id)return '李懿（谱名：广懿）';
+  const key=personQuery(q);
+  const alias=[d.zi,d.hao].filter(Boolean).find(a=>key && fuzzyScore(a,key)>=40);
+  return alias?'李氏 · '+alias+'（谱名：'+d.name+'）':'李氏 · '+d.name;
+}
+
 function showResults(){
   const q=search.value,arr=searchPeople(q);
   if(!q){results.classList.remove('show');return}
@@ -542,7 +591,7 @@ function showResults(){
   }else{
     for(const d of arr){
       const item=document.createElement('div');item.className='result';
-      item.innerHTML=`<div><strong>${d.id===me?.id?'李懿（谱名：广懿）':d.name}</strong><small>${genText(d.gen)}${d.father?' · 父 '+d.father:''}${d.zi?' · 字 '+d.zi:''}</small></div><div class="pg">苏式图 ${suPage(d.page)} 页</div>`;
+      item.innerHTML=`<div><strong>${escapeHtml(searchResultTitle(d,q))}</strong><small>${genText(d.gen)}${d.father?' · 父 '+d.father:''}${d.zi?' · 字 '+d.zi:''}</small></div><div class="pg">苏式图 ${suPage(d.page)} 页</div>`;
       item.onclick=()=>{results.classList.remove('show');search.value=d.id===me?.id?'李懿':d.name;locate(d.id,1.15)};
       results.appendChild(item);
     }
@@ -550,7 +599,9 @@ function showResults(){
   results.classList.add('show');
 }
 search.addEventListener('input',showResults);
+search.addEventListener('focus',showResults);
 search.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){results.classList.remove('show');return;}
   if(e.key==='Enter'){
     const a=searchPeople(search.value);if(a[0]){results.classList.remove('show');locate(a[0].id,1.15)}
   }
